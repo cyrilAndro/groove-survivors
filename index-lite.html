@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Groove Survivors – 70s (Lite)</title>
+  <meta name="description" content="Vampire Survivors-like 70s, version légère sans dépendances." />
+  <style>
+    :root { color-scheme: dark; }
+    html, body { height:100%; margin:0; background:#000; font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif; }
+    .wrap { position:relative; width:100%; height:100vh; overflow:hidden; }
+    canvas { width:100%; height:100%; display:block; }
+    .hud-top { position:absolute; inset:0 auto auto 0; right:0; display:flex; justify-content:space-between; align-items:center; padding:12px 14px; pointer-events:none; }
+    .disco { font-weight:900; letter-spacing:-0.02em; position:relative; font-size: clamp(18px, 2.5vw, 32px); }
+    .disco::before { content:attr(data-t); position:absolute; left:1px; top:1px; color:#f0abfc; opacity:.7; filter:blur(1px); }
+    .disco::after { content:attr(data-t); position:absolute; left:-1px; top:-1px; color:#67e8f9; opacity:.7; filter:blur(1px); }
+    .disco span { color:#fde68a; text-shadow:0 2px 6px rgba(0,0,0,.35); }
+    .bar { width:min(56vw, 420px); height:10px; border-radius:999px; background:rgba(0,0,0,.35); box-shadow:0 0 0 2px rgba(255,255,255,.15) inset; overflow:hidden; }
+    .fill { height:100%; background: linear-gradient(90deg, #fb7185, #e879f9, #fcd34d); width:100%; transition:width .2s linear; }
+    .hud-bottom { position:absolute; inset:auto 0 0 0; display:flex; justify-content:space-between; align-items:center; padding:12px 14px; }
+    .btns { display:flex; gap:8px; }
+    .btn { border:0; font-weight:800; padding:10px 16px; border-radius:16px; cursor:pointer; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+    .b-amber { background:#fbbf24; color:#111; }
+    .b-amber:hover { background:#f59e0b; }
+    .b-pink { background:#f472b6; color:#111; }
+    .b-pink:hover { background:#fb7185; }
+    .b-cyan { background:#67e8f9; color:#111; }
+    .b-cyan:hover { background:#22d3ee; }
+    .overlay { position:absolute; inset:0; display:grid; place-items:center; background:rgba(0,0,0,.35); backdrop-filter: blur(4px); }
+    .card { text-align:center; max-width:720px; margin:0 16px; }
+    .lead { color:#fde68a; opacity:.95; line-height:1.5; margin-top:8px; }
+    .row { display:flex; justify-content:center; gap:10px; margin-top:14px; }
+    .small { color:#fde68a; opacity:.9; font-size:14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game"></canvas>
+
+    <div class="hud-top">
+      <div class="disco" id="scoreT" data-t="SCORE 000000"><span>SCORE 000000</span></div>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <div class="bar"><div class="fill" id="hpFill" style="width:100%"></div></div>
+        <div class="disco" id="lvT" data-t="LV 1"><span>LV 1</span></div>
+        <div class="disco" id="timeT" data-t="00:00"><span>00:00</span></div>
+      </div>
+    </div>
+
+    <div class="hud-bottom">
+      <div class="small">Move: WASD/Arrows • Pause: Space/P • Mute: M</div>
+      <div class="btns">
+        <button class="btn b-amber" id="startBtn">Start</button>
+        <button class="btn b-pink" id="muteBtn">Unmute</button>
+        <button class="btn b-cyan" id="pauseBtn">Play</button>
+      </div>
+    </div>
+
+    <div class="overlay" id="startOverlay">
+      <div class="card">
+        <div class="disco" data-t="GROOVE SURVIVORS" style="font-size: clamp(28px, 6vw, 72px);"><span>GROOVE SURVIVORS</span></div>
+        <div class="lead">A 70s neon-disco tribute to bullet heaven. Glide through gooey neon creatures, auto-fire disco rays, and collect vinyls to level up. Survive. Score. Boogie.</div>
+        <div class="row">
+          <button class="btn b-amber" id="startBtn2">Start (Enter)</button>
+          <button class="btn b-pink" id="enableSoundBtn">Enable Sound</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="overlay" id="gameOverOverlay" style="display:none;">
+      <div class="card">
+        <div class="disco" data-t="GAME OVER" style="font-size: clamp(36px, 7vw, 96px);"><span>GAME OVER</span></div>
+        <div class="lead" id="finalStats">Score: 0 • Level: 1 • Time: 00:00</div>
+        <div class="row"><button class="btn b-amber" id="againBtn">Play Again</button></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const clamp=(n,min,max)=>Math.max(min,Math.min(max,n));
+  const rand=(a,b)=>a+Math.random()*(b-a);
+  const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+  const cvs=document.getElementById('game');
+  const ctx=cvs.getContext('2d');
+  function resize(){ cvs.width=cvs.clientWidth; cvs.height=cvs.clientHeight; }
+  new ResizeObserver(resize).observe(cvs); resize();
+
+  // HUD elements
+  const scoreT=document.getElementById('scoreT').children[0];
+  const lvT=document.getElementById('lvT').children[0];
+  const timeT=document.getElementById('timeT').children[0];
+  const hpFill=document.getElementById('hpFill');
+
+  const startOverlay=document.getElementById('startOverlay');
+  const gameOverOverlay=document.getElementById('gameOverOverlay');
+  const startBtn=document.getElementById('startBtn');
+  const startBtn2=document.getElementById('startBtn2');
+  const enableSoundBtn=document.getElementById('enableSoundBtn');
+  const pauseBtn=document.getElementById('pauseBtn');
+  const muteBtn=document.getElementById('muteBtn');
+  const againBtn=document.getElementById('againBtn');
+  const finalStats=document.getElementById('finalStats');
+
+  let running=false, muted=true, gameOver=false;
+  let last=performance.now(), t=0;
+  const player={x:cvs.width/2, y:cvs.height/2, r:14, speed:200, hp:100, xp:0, level:1, invul:0};
+  const state={enemies:[], bullets:[], gems:[], spawnTimer:0, fireTimer:0, difficulty:1};
+  const keys={};
+
+  // Audio (lite blips)
+  let audioCtx=null;
+  function blip(freq=880,dur=0.06,type='sine',gain=0.06){
+    if(muted) return;
+    if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    const o=audioCtx.createOscillator(); const g=audioCtx.createGain();
+    o.type=type; o.frequency.value=freq; g.gain.value=gain; o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime+dur);
+  }
+
+  window.addEventListener('keydown',e=>{ keys[e.key.toLowerCase()]=true;
+    if(!running && (e.key==='Enter' || e.key===' ')){ start(); }
+    if(e.key.toLowerCase()==='p' || e.key===' ') togglePause();
+    if(e.key.toLowerCase()==='m') { muted=!muted; muteBtn.textContent=muted?'Unmute':'Mute'; }
+  });
+  window.addEventListener('keyup',e=>{ keys[e.key.toLowerCase()]=false; });
+
+  function start(){
+    running=true; gameOver=false; t=0;
+    player.x=cvs.width/2; player.y=cvs.height/2; player.hp=100; player.xp=0; player.level=1; player.invul=0;
+    state.enemies.length=0; state.bullets.length=0; state.gems.length=0;
+    state.spawnTimer=0; state.fireTimer=0; state.difficulty=1;
+    startOverlay.style.display='none'; gameOverOverlay.style.display='none';
+    pauseBtn.textContent='Pause';
+  }
+  function togglePause(){ running=!running; pauseBtn.textContent=running?'Pause':'Play'; }
+
+  startBtn.onclick=start; startBtn2.onclick=start; againBtn.onclick=start;
+  enableSoundBtn.onclick=()=>{ muted=false; muteBtn.textContent='Mute'; };
+
+  function spawnEnemy(){
+    const edge=Math.floor(Math.random()*4), margin=40;
+    const speed=rand(35,70)+state.difficulty*6;
+    let x,y;
+    if(edge===0){x=rand(-margin,cvs.width+margin); y=-margin;}
+    else if(edge===1){x=cvs.width+margin; y=rand(-margin,cvs.height+margin);}
+    else if(edge===2){x=rand(-margin,cvs.width+margin); y=cvs.height+margin;}
+    else {x=-margin; y=rand(-margin,cvs.height+margin);}
+    const size=rand(12,22)+state.difficulty*0.5;
+    state.enemies.push({x,y,r:size,hp:2+Math.floor(state.difficulty*0.7),speed});
+  }
+  function fire(){
+    const burst=8+Math.min(8,player.level*2);
+    for(let i=0;i<burst;i++){
+      const a=(i/burst)*Math.PI*2 + t*0.6;
+      const v=240 + player.level*15;
+      const dmg=1 + Math.floor(player.level/2);
+      state.bullets.push({x:player.x,y:player.y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,r:4,dmg,life:0.9});
+    }
+    blip(1100,0.05,'triangle',0.03);
+  }
+  function dropGem(x,y){ state.gems.push({x,y,r:5,value:1}); }
+  function levelUp(){ player.level++; player.hp=clamp(player.hp+6,0,100); blip(660,0.12,'square',0.05); }
+
+  function hueShift(h,s,l,a=1){ return `hsla(${h}, ${s}%, ${l}%, ${a})`; }
+  function ring(x,y,r,color,width=4){ ctx.save(); ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.strokeStyle=color; ctx.lineWidth=width; ctx.stroke(); ctx.restore(); }
+  function glowCircle(x,y,r,color){ ctx.save(); ctx.shadowBlur=r*0.8; ctx.shadowColor=color; ctx.fillStyle=color; ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill(); ctx.restore(); }
+  function drawStarburst(cx,cy,radius,spokes,baseHue){
+    ctx.save();
+    for(let i=0;i<spokes;i++){
+      const a=(i/spokes)*Math.PI*2; const r2=radius*(i%2===0?1:0.6);
+      ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+Math.cos(a)*r2, cy+Math.sin(a)*r2);
+      ctx.strokeStyle=hueShift((baseHue+i*7)%360,80,60,0.12); ctx.lineWidth=8; ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function formatTime(s){ const ss=Math.floor(s%60).toString().padStart(2,'0'); const mm=Math.floor(s/60).toString().padStart(2,'0'); return `${mm}:${ss}`; }
+
+  function loop(now){
+    const dt=Math.min(0.05,(now-last)/1000); last=now;
+    if(!running){ requestAnimationFrame(loop); return; }
+
+    t+=dt; state.difficulty=1+t*0.25;
+
+    // input
+    let dx=0,dy=0;
+    if(keys['arrowleft']||keys['a']) dx-=1; if(keys['arrowright']||keys['d']) dx+=1;
+    if(keys['arrowup']||keys['w']) dy-=1; if(keys['arrowdown']||keys['s']) dy+=1;
+    const mag=Math.hypot(dx,dy)||1;
+    player.x=clamp(player.x+(dx/mag)*player.speed*dt, 0, cvs.width);
+    player.y=clamp(player.y+(dy/mag)*player.speed*dt, 0, cvs.height);
+
+    // timers
+    state.spawnTimer-=dt;
+    if(state.spawnTimer<=0){ for(let i=0;i<1+Math.floor(state.difficulty*0.2); i++) spawnEnemy();
+      state.spawnTimer=Math.max(0.2,1.2-state.difficulty*0.05); }
+    state.fireTimer-=dt;
+    if(state.fireTimer<=0){ fire(); state.fireTimer=Math.max(0.18,0.65-player.level*0.03); }
+
+    // enemies
+    for(const e of state.enemies){ const ang=Math.atan2(player.y-e.y,player.x-e.x); e.x+=Math.cos(ang)*e.speed*dt; e.y+=Math.sin(ang)*e.speed*dt; }
+    // bullets
+    for(const b of state.bullets){ b.x+=b.vx*dt; b.y+=b.vy*dt; b.life-=dt; }
+
+    // collisions
+    for(const b of state.bullets){
+      if(b.life<=0) continue;
+      for(const e of state.enemies){
+        const d=Math.hypot(b.x-e.x,b.y-e.y);
+        if(d<b.r+e.r){ e.hp-=b.dmg; b.life=0; if(e.hp<=0){ dropGem(e.x,e.y);} break; }
+      }
+    }
+    state.enemies=state.enemies.filter(e=>e.hp>0 && e.x>-80 && e.x<cvs.width+80 && e.y>-80 && e.y<cvs.height+80);
+    state.bullets=state.bullets.filter(b=>b.life>0 && b.x>-40 && b.x<cvs.width+40 && b.y>-40 && b.y<cvs.height+40);
+
+    // gems
+    for(const g of state.gems){
+      if(dist(g,player)<g.r+player.r+6){ player.xp+=g.value; score+=10; g.collected=true; blip(880,0.05,'sine',0.04); }
+      else { const d=dist(g,player); if(d<100){ const a=Math.atan2(player.y-g.y,player.x-g.x); g.x+=Math.cos(a)*80*dt*(1-d/100); g.y+=Math.sin(a)*80*dt*(1-d/100);} }
+    }
+    state.gems=state.gems.filter(g=>!g.collected);
+
+    // level up
+    const need=5+player.level*3;
+    if(player.xp>=need){ player.xp-=need; levelUp(); }
+
+    // damage
+    if(player.invul>0) player.invul-=dt;
+    for(const e of state.enemies){
+      if(dist(player,e)<player.r+e.r){ if(player.invul<=0){ player.hp-=Math.ceil(4+state.difficulty*0.8); player.invul=0.8; blip(220,0.08,'sawtooth',0.05);
+        if(player.hp<=0){ gameOver=true; running=false; gameOverOverlay.style.display='grid';
+          finalStats.textContent=`Score: ${score} • Level: ${player.level} • Time: ${formatTime(t)}`; } } }
+    }
+
+    // draw
+    ctx.clearRect(0,0,cvs.width,cvs.height);
+    const grd=ctx.createRadialGradient(
+      cvs.width*0.5+Math.sin(t*0.2)*100, cvs.height*0.5+Math.cos(t*0.25)*100, 20,
+      cvs.width*0.5, cvs.height*0.5, Math.max(cvs.width,cvs.height)
+    );
+    grd.addColorStop(0, hueShift((t*40)%360,90,55));
+    grd.addColorStop(0.5, hueShift((t*40+120)%360,90,30));
+    grd.addColorStop(1, hueShift((t*40+240)%360,90,10));
+    ctx.fillStyle=grd; ctx.fillRect(0,0,cvs.width,cvs.height);
+    drawStarburst(cvs.width/2, cvs.height/2, Math.max(cvs.width,cvs.height)*0.7, 48, (t*50)%360);
+
+    for(const g of state.gems){
+      ctx.save(); ctx.translate(g.x,g.y); ctx.rotate(t*4);
+      glowCircle(0,0,g.r+2,'rgba(255,255,255,0.08)');
+      ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(0,0,g.r+1,0,Math.PI*2); ctx.fill();
+      ring(0,0,g.r,'#ffda6b',2); ring(0,0,g.r*0.6,'#f472b6',2);
+      ctx.fillStyle='#f59e0b'; ctx.beginPath(); ctx.arc(0,0,2,0,Math.PI*2); ctx.fill(); ctx.restore();
+    }
+
+    for(const e of state.enemies){
+      const hue=(t*60+e.x*0.1+e.y*0.1)%360;
+      glowCircle(e.x,e.y,e.r*1.3,hueShift(hue,80,60,0.12));
+      ctx.fillStyle=hueShift((hue+20)%360,90,50,0.9);
+      ctx.beginPath(); const wob=Math.sin(t*5+e.x*0.05+e.y*0.05)*(e.r*0.2);
+      ctx.arc(e.x,e.y,Math.max(6,e.r+wob),0,Math.PI*2); ctx.fill();
+      ring(e.x,e.y,Math.max(6,e.r+wob)+2,hueShift(hue,80,70,0.35),2);
+    }
+
+    const discoHue=(t*120)%360;
+    glowCircle(player.x,player.y,player.r*2,hueShift((discoHue+200)%360,90,70,0.25));
+    ctx.save(); ctx.translate(player.x,player.y);
+    const r=player.r, slices=14;
+    for(let i=0;i<slices;i++){ ctx.beginPath(); ctx.moveTo(0,0);
+      ctx.arc(0,0,r,(i/slices)*Math.PI*2,((i+1)/slices)*Math.PI*2); ctx.closePath();
+      ctx.fillStyle=i%2===0? '#e5e7eb':'#9ca3af'; ctx.globalAlpha=0.9; ctx.fill(); }
+    ring(0,0,r+2,hueShift((discoHue+40)%360,90,70,0.6),3); ctx.restore();
+
+    for(const b of state.bullets){
+      ctx.save(); ctx.globalCompositeOperation='lighter';
+      ctx.strokeStyle=hueShift((discoHue+120)%360,90,70,0.9);
+      ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(b.x,b.y);
+      ctx.lineTo(b.x-b.vx*0.03,b.y-b.vy*0.03); ctx.stroke(); ctx.restore();
+    }
+
+    ctx.save(); ctx.globalAlpha=0.05; for(let y=0; y<cvs.height; y+=3){ ctx.fillStyle='#000'; ctx.fillRect(0,y,cvs.width,1); } ctx.restore();
+
+    // HUD
+    timeT.textContent=formatTime(t);
+    lvT.textContent='LV '+player.level;
+    hpFill.style.width=player.hp+'%';
+    scoreT.textContent='SCORE '+String(score).padStart(6,'0');
+
+    requestAnimationFrame(loop);
+  }
+
+  let score=0;
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
