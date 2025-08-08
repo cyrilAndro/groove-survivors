@@ -1,0 +1,517 @@
+import React, { useEffect, useRef, useState } from "react";
+
+// Vampire Survivors – 70s Groove Edition
+// Controls: WASD / Arrow Keys to move. Space or P to pause. M to mute.
+// Goal: Survive as long as possible. Auto-attacks fire periodically. Pick up vinyls (XP) to level up.
+
+const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+const rand = (a, b) => a + Math.random() * (b - a);
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+function useKeys() {
+  const keysRef = useRef({});
+  useEffect(() => {
+    const down = (e) => (keysRef.current[e.key.toLowerCase()] = true);
+    const up = (e) => (keysRef.current[e.key.toLowerCase()] = false);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
+  }, []);
+  return keysRef;
+}
+
+function hueShift(h, s, l, a = 1) {
+  return `hsla(${h}, ${s}%, ${l}%, ${a})`;
+}
+
+function ring(ctx, x, y, r, color, width = 4) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function glowCircle(ctx, x, y, r, color) {
+  ctx.save();
+  ctx.shadowBlur = r * 0.8;
+  ctx.shadowColor = color;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawStarburst(ctx, cx, cy, radius, spokes, baseHue) {
+  ctx.save();
+  for (let i = 0; i < spokes; i++) {
+    const a = (i / spokes) * Math.PI * 2;
+    const r2 = radius * (i % 2 === 0 ? 1 : 0.6);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2);
+    ctx.strokeStyle = hueShift((baseHue + i * 7) % 360, 80, 60, 0.12);
+    ctx.lineWidth = 8;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function DiscoText({ text, className = "" }) {
+  return (
+    <div className={`select-none font-extrabold tracking-tight ${className}`}>
+      <div className="relative inline-block">
+        <span className="absolute left-0.5 top-0.5 text-fuchsia-400 opacity-70 blur-[1px]">
+          {text}
+        </span>
+        <span className="absolute left-[-0.5px] top-[-0.5px] text-cyan-300 opacity-70 blur-[1px]">
+          {text}
+        </span>
+        <span className="text-amber-100 drop-shadow-[0_2px_6px_rgba(0,0,0,0.35)]">
+          {text}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export default function GrooveSurvivors70s() {
+  const canvasRef = useRef(null);
+  const [running, setRunning] = useState(false);
+  const [muted, setMuted] = useState(true);
+  const [stats, setStats] = useState({ time: 0, score: 0, level: 1, hp: 100 });
+  const [gameOver, setGameOver] = useState(false);
+  const keysRef = useKeys();
+
+  // Minimal synthy click for pickups / hits
+  const audioCtxRef = useRef(null);
+  function blip(freq = 880, dur = 0.06, type = "sine", gain = 0.06) {
+    if (muted) return;
+    if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = audioCtxRef.current;
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = type;
+    o.frequency.value = freq;
+    g.gain.value = gain;
+    o.connect(g);
+    g.connect(ctx.destination);
+    o.start();
+    o.stop(ctx.currentTime + dur);
+  }
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    let w = (canvas.width = canvas.clientWidth);
+    let h = (canvas.height = canvas.clientHeight);
+
+    let last = performance.now();
+    let t = 0; // seconds
+
+    const player = {
+      x: w / 2,
+      y: h / 2,
+      r: 14,
+      speed: 200,
+      hp: 100,
+      xp: 0,
+      level: 1,
+      invul: 0,
+    };
+
+    const state = {
+      enemies: [],
+      bullets: [],
+      gems: [],
+      spawnTimer: 0,
+      fireTimer: 0,
+      difficulty: 1,
+    };
+
+    function onResize() {
+      w = canvas.width = canvas.clientWidth;
+      h = canvas.height = canvas.clientHeight;
+    }
+    const ro = new ResizeObserver(onResize);
+    ro.observe(canvas);
+
+    function spawnEnemy() {
+      const edge = Math.floor(Math.random() * 4); // 0 top, 1 right, 2 bottom, 3 left
+      const margin = 40;
+      const speed = rand(35, 70) + state.difficulty * 6;
+      let x, y;
+      if (edge === 0) {
+        x = rand(-margin, w + margin); y = -margin;
+      } else if (edge === 1) {
+        x = w + margin; y = rand(-margin, h + margin);
+      } else if (edge === 2) {
+        x = rand(-margin, w + margin); y = h + margin;
+      } else {
+        x = -margin; y = rand(-margin, h + margin);
+      }
+      const size = rand(12, 22) + state.difficulty * 0.5;
+      state.enemies.push({ x, y, r: size, hp: 2 + Math.floor(state.difficulty * 0.7), speed });
+    }
+
+    function fire() {
+      const burst = 8 + Math.min(8, player.level * 2);
+      for (let i = 0; i < burst; i++) {
+        const a = (i / burst) * Math.PI * 2 + t * 0.6;
+        const v = 240 + player.level * 15;
+        const dmg = 1 + Math.floor(player.level / 2);
+        state.bullets.push({ x: player.x, y: player.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, r: 4, dmg, life: 0.9 });
+      }
+      blip(1100, 0.05, "triangle", 0.03);
+    }
+
+    function dropGem(x, y) {
+      state.gems.push({ x, y, r: 5, value: 1 });
+    }
+
+    function levelUp() {
+      player.level++;
+      player.hp = clamp(player.hp + 6, 0, 100);
+      blip(660, 0.12, "square", 0.05);
+    }
+
+    let animId;
+
+    function loop(now) {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      if (!running) {
+        animId = requestAnimationFrame(loop);
+        return;
+      }
+
+      t += dt;
+      state.difficulty = 1 + t * 0.25;
+
+      // INPUT
+      const k = keysRef.current;
+      let dx = 0, dy = 0;
+      if (k["arrowleft"] || k["a"]) dx -= 1;
+      if (k["arrowright"] || k["d"]) dx += 1;
+      if (k["arrowup"] || k["w"]) dy -= 1;
+      if (k["arrowdown"] || k["s"]) dy += 1;
+      const mag = Math.hypot(dx, dy) || 1;
+      player.x = clamp(player.x + (dx / mag) * player.speed * dt, 0, w);
+      player.y = clamp(player.y + (dy / mag) * player.speed * dt, 0, h);
+
+      // TIMERS
+      state.spawnTimer -= dt;
+      if (state.spawnTimer <= 0) {
+        const spawns = 1 + Math.floor(state.difficulty * 0.2);
+        for (let i = 0; i < spawns; i++) spawnEnemy();
+        state.spawnTimer = Math.max(0.2, 1.2 - state.difficulty * 0.05);
+      }
+      state.fireTimer -= dt;
+      if (state.fireTimer <= 0) {
+        fire();
+        state.fireTimer = Math.max(0.18, 0.65 - player.level * 0.03);
+      }
+
+      // UPDATE ENEMIES
+      for (let e of state.enemies) {
+        const ang = Math.atan2(player.y - e.y, player.x - e.x);
+        e.x += Math.cos(ang) * e.speed * dt;
+        e.y += Math.sin(ang) * e.speed * dt;
+      }
+
+      // UPDATE BULLETS
+      for (let b of state.bullets) {
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        b.life -= dt;
+      }
+
+      // COLLISIONS: bullets vs enemies
+      for (let b of state.bullets) {
+        if (b.life <= 0) continue;
+        for (let e of state.enemies) {
+          const d = Math.hypot(b.x - e.x, b.y - e.y);
+          if (d < b.r + e.r) {
+            e.hp -= b.dmg;
+            b.life = 0;
+            if (e.hp <= 0) {
+              // drop gem
+              dropGem(e.x, e.y);
+            }
+            break;
+          }
+        }
+      }
+
+      // Remove dead enemies and expired bullets
+      state.enemies = state.enemies.filter((e) => e.hp > 0 && e.x > -80 && e.x < w + 80 && e.y > -80 && e.y < h + 80);
+      state.bullets = state.bullets.filter((b) => b.life > 0 && b.x > -40 && b.x < w + 40 && b.y > -40 && b.y < h + 40);
+
+      // Gems collection
+      for (let g of state.gems) {
+        if (dist(g, player) < g.r + player.r + 6) {
+          player.xp += g.value;
+          setStats((s) => ({ ...s, score: s.score + 10 }));
+          g.collected = true;
+          blip(880, 0.05, "sine", 0.04);
+        } else {
+          // mild magnet effect when close
+          const d = dist(g, player);
+          if (d < 100) {
+            const a = Math.atan2(player.y - g.y, player.x - g.x);
+            g.x += Math.cos(a) * 80 * dt * (1 - d / 100);
+            g.y += Math.sin(a) * 80 * dt * (1 - d / 100);
+          }
+        }
+      }
+      state.gems = state.gems.filter((g) => !g.collected);
+
+      // Level up thresholds
+      const need = 5 + player.level * 3;
+      if (player.xp >= need) {
+        player.xp -= need;
+        levelUp();
+        setStats((s) => ({ ...s, level: player.level }));
+      }
+
+      // Player damage on enemy contact
+      if (player.invul > 0) player.invul -= dt;
+      for (let e of state.enemies) {
+        if (dist(player, e) < player.r + e.r) {
+          if (player.invul <= 0) {
+            player.hp -= Math.ceil(4 + state.difficulty * 0.8);
+            player.invul = 0.8;
+            blip(220, 0.08, "sawtooth", 0.05);
+            setStats((s) => ({ ...s, hp: clamp(player.hp, 0, 100) }));
+            if (player.hp <= 0) {
+              setGameOver(true);
+              setRunning(false);
+            }
+          }
+        }
+      }
+
+      // DRAW
+      ctx.clearRect(0, 0, w, h);
+
+      // Psychedelic gradient background
+      const grd = ctx.createRadialGradient(w * 0.5 + Math.sin(t * 0.2) * 100, h * 0.5 + Math.cos(t * 0.25) * 100, 20,
+        w * 0.5, h * 0.5, Math.max(w, h));
+      grd.addColorStop(0, hueShift((t * 40) % 360, 90, 55));
+      grd.addColorStop(0.5, hueShift((t * 40 + 120) % 360, 90, 30));
+      grd.addColorStop(1, hueShift((t * 40 + 240) % 360, 90, 10));
+      ctx.fillStyle = grd;
+      ctx.fillRect(0, 0, w, h);
+
+      // Starburst
+      drawStarburst(ctx, w / 2, h / 2, Math.max(w, h) * 0.7, 48, (t * 50) % 360);
+
+      // Gems (vinyls)
+      for (let g of state.gems) {
+        ctx.save();
+        ctx.translate(g.x, g.y);
+        ctx.rotate(t * 4);
+        glowCircle(ctx, 0, 0, g.r + 2, "rgba(255,255,255,0.08)");
+        ctx.fillStyle = "#111";
+        ctx.beginPath();
+        ctx.arc(0, 0, g.r + 1, 0, Math.PI * 2);
+        ctx.fill();
+        ring(ctx, 0, 0, g.r, "#ffda6b", 2);
+        ring(ctx, 0, 0, g.r * 0.6, "#f472b6", 2);
+        ctx.fillStyle = "#f59e0b";
+        ctx.beginPath();
+        ctx.arc(0, 0, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Enemies – gooey neon blobs
+      for (let e of state.enemies) {
+        const hue = (t * 60 + e.x * 0.1 + e.y * 0.1) % 360;
+        glowCircle(ctx, e.x, e.y, e.r * 1.3, hueShift(hue, 80, 60, 0.12));
+        ctx.fillStyle = hueShift((hue + 20) % 360, 90, 50, 0.9);
+        ctx.beginPath();
+        const wob = Math.sin(t * 5 + e.x * 0.05 + e.y * 0.05) * (e.r * 0.2);
+        ctx.arc(e.x, e.y, Math.max(6, e.r + wob), 0, Math.PI * 2);
+        ctx.fill();
+        ring(ctx, e.x, e.y, Math.max(6, e.r + wob) + 2, hueShift(hue, 80, 70, 0.35), 2);
+      }
+
+      // Player – disco ball
+      const discoHue = (t * 120) % 360;
+      glowCircle(ctx, player.x, player.y, player.r * 2, hueShift((discoHue + 200) % 360, 90, 70, 0.25));
+      ctx.save();
+      ctx.translate(player.x, player.y);
+      const r = player.r;
+      const slices = 14;
+      for (let i = 0; i < slices; i++) {
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, r, (i / slices) * Math.PI * 2, ((i + 1) / slices) * Math.PI * 2);
+        ctx.closePath();
+        ctx.fillStyle = i % 2 === 0 ? "#e5e7eb" : "#9ca3af";
+        ctx.globalAlpha = 0.9;
+        ctx.fill();
+      }
+      ring(ctx, 0, 0, r + 2, hueShift((discoHue + 40) % 360, 90, 70, 0.6), 3);
+      ctx.restore();
+
+      // Bullets – rays
+      for (let b of state.bullets) {
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        ctx.strokeStyle = hueShift((discoHue + 120) % 360, 90, 70, 0.9);
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y);
+        ctx.lineTo(b.x - b.vx * 0.03, b.y - b.vy * 0.03);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // HUD scanlines
+      ctx.save();
+      ctx.globalAlpha = 0.05;
+      for (let y2 = 0; y2 < h; y2 += 3) {
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, y2, w, 1);
+      }
+      ctx.restore();
+
+      // Update time for HUD
+      setStats((s) => ({ ...s, time: t, score: s.score, hp: clamp(player.hp, 0, 100), level: player.level }));
+
+      animId = requestAnimationFrame(loop);
+    }
+
+    animId = requestAnimationFrame(loop);
+
+    // Pause / Mute shortcuts
+    const onKey = (e) => {
+      const k = e.key.toLowerCase();
+      if (k === "p" || k === " ") setRunning((r) => !r);
+      if (k === "m") setMuted((m) => !m);
+      if (!running && (k === "enter" || k === " ")) {
+        setRunning(true);
+        setGameOver(false);
+        setStats({ time: 0, score: 0, level: 1, hp: 100 });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+
+    return () => {
+      cancelAnimationFrame(animId);
+      window.removeEventListener("keydown", onKey);
+      ro.disconnect();
+    };
+  }, [running, muted]);
+
+  return (
+    <div className="relative w-full h-[80vh] sm:h-[86vh] rounded-2xl overflow-hidden bg-black">
+      <canvas ref={canvasRef} className="w-full h-full block" />
+
+      {/* Top HUD */}
+      <div className="pointer-events-none absolute left-0 right-0 top-0 p-3 sm:p-4 flex items-center justify-between">
+        <DiscoText text={`SCORE ${stats.score.toString().padStart(6, "0")}`} className="text-2xl sm:text-3xl" />
+        <div className="flex items-center gap-3">
+          <div className="w-40 sm:w-56 h-3 rounded-full bg-black/40 ring-2 ring-white/20 overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-rose-400 via-fuchsia-400 to-amber-300 transition-all"
+              style={{ width: `${stats.hp}%` }}
+            />
+          </div>
+          <DiscoText text={`LV ${stats.level}`} className="text-xl" />
+          <DiscoText text={formatTime(stats.time)} className="text-xl" />
+        </div>
+      </div>
+
+      {/* Bottom controls */}
+      <div className="absolute left-0 right-0 bottom-0 p-3 sm:p-4 flex items-center justify-between">
+        <div className="text-amber-100/90 text-sm sm:text-base">
+          Move: WASD/Arrows • Pause: Space/P • Mute: M
+        </div>
+        <div className="flex gap-2">
+          <button
+            className="pointer-events-auto px-4 py-2 rounded-2xl bg-amber-400/90 hover:bg-amber-300 text-black font-bold shadow-lg"
+            onClick={() => {
+              setRunning(true);
+              setGameOver(false);
+              setStats({ time: 0, score: 0, level: 1, hp: 100 });
+            }}
+          >
+            {gameOver ? "Restart" : running ? "Resume" : "Start"}
+          </button>
+          <button
+            className="pointer-events-auto px-4 py-2 rounded-2xl bg-fuchsia-400/90 hover:bg-fuchsia-300 text-black font-bold shadow-lg"
+            onClick={() => setMuted((m) => !m)}
+          >
+            {muted ? "Unmute" : "Mute"}
+          </button>
+          <button
+            className="pointer-events-auto px-4 py-2 rounded-2xl bg-cyan-300/90 hover:bg-cyan-200 text-black font-bold shadow-lg"
+            onClick={() => setRunning((r) => !r)}
+          >
+            {running ? "Pause" : "Play"}
+          </button>
+        </div>
+      </div>
+
+      {/* Title / Overlay */}
+      {!running && !gameOver && (
+        <div className="absolute inset-0 grid place-items-center bg-black/30 backdrop-blur-sm">
+          <div className="text-center">
+            <DiscoText text="GROOVE SURVIVORS" className="text-4xl sm:text-6xl mb-2" />
+            <div className="text-amber-100/95 max-w-xl mx-auto leading-relaxed">
+              A 70s neon-disco tribute to bullet heaven. Glide through gooey neon creatures, auto-fire disco rays, and collect vinyls to level up. Survive. Score. Boogie.
+            </div>
+            <div className="mt-4 flex justify-center gap-2">
+              <button
+                className="px-6 py-3 rounded-2xl bg-amber-400 hover:bg-amber-300 text-black font-extrabold shadow-xl"
+                onClick={() => setRunning(true)}
+              >
+                Start (Enter)
+              </button>
+              <button
+                className="px-6 py-3 rounded-2xl bg-fuchsia-400 hover:bg-fuchsia-300 text-black font-extrabold shadow-xl"
+                onClick={() => setMuted(false)}
+              >
+                Enable Sound
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {gameOver && (
+        <div className="absolute inset-0 grid place-items-center bg-black/50 backdrop-blur-sm">
+          <div className="text-center">
+            <DiscoText text="GAME OVER" className="text-5xl sm:text-7xl mb-4" />
+            <div className="text-amber-100/95 mb-4">Score: {stats.score} • Level: {stats.level} • Time: {formatTime(stats.time)}</div>
+            <button
+              className="px-6 py-3 rounded-2xl bg-amber-400 hover:bg-amber-300 text-black font-extrabold shadow-xl"
+              onClick={() => {
+                setGameOver(false);
+                setStats({ time: 0, score: 0, level: 1, hp: 100 });
+                setRunning(true);
+              }}
+            >
+              Play Again
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatTime(seconds) {
+  const s = Math.floor(seconds % 60).toString().padStart(2, "0");
+  const m = Math.floor(seconds / 60).toString().padStart(2, "0");
+  return `${m}:${s}`;
+}
